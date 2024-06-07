@@ -317,7 +317,7 @@ fn parse_create_table_with_defaults() {
             active int NOT NULL
     ) WITH (fillfactor = 20, user_catalog_table = true, autovacuum_vacuum_threshold = 100)";
     match pg_and_generic().one_statement_parses_to(sql, "") {
-        Statement::CreateTable {
+        Statement::CreateTable(CreateTable {
             name,
             columns,
             constraints,
@@ -327,7 +327,7 @@ fn parse_create_table_with_defaults() {
             file_format: None,
             location: None,
             ..
-        } => {
+        }) => {
             use pretty_assertions::assert_eq;
             assert_eq!("public.customer", name.to_string());
             assert_eq!(
@@ -537,12 +537,12 @@ fn parse_create_table_constraints_only() {
     let sql = "CREATE TABLE t (CONSTRAINT positive CHECK (2 > 1))";
     let ast = pg_and_generic().verified_stmt(sql);
     match ast {
-        Statement::CreateTable {
+        Statement::CreateTable(CreateTable {
             name,
             columns,
             constraints,
             ..
-        } => {
+        }) => {
             assert_eq!("t", name.to_string());
             assert!(columns.is_empty());
             assert_eq!(
@@ -718,11 +718,11 @@ fn parse_create_table_if_not_exists() {
     let sql = "CREATE TABLE IF NOT EXISTS uk_cities ()";
     let ast = pg_and_generic().verified_stmt(sql);
     match ast {
-        Statement::CreateTable {
+        Statement::CreateTable(CreateTable {
             name,
             if_not_exists: true,
             ..
-        } => {
+        }) => {
             assert_eq!("uk_cities", name.to_string());
         }
         _ => unreachable!(),
@@ -1201,7 +1201,7 @@ fn parse_set() {
         Statement::SetVariable {
             local: false,
             hivevar: false,
-            variable: ObjectName(vec![Ident::new("a")]),
+            variables: OneOrManyWithParens::One(ObjectName(vec![Ident::new("a")])),
             value: vec![Expr::Identifier(Ident {
                 value: "b".into(),
                 quote_style: None
@@ -1215,7 +1215,7 @@ fn parse_set() {
         Statement::SetVariable {
             local: false,
             hivevar: false,
-            variable: ObjectName(vec![Ident::new("a")]),
+            variables: OneOrManyWithParens::One(ObjectName(vec![Ident::new("a")])),
             value: vec![Expr::Value(Value::SingleQuotedString("b".into()))],
         }
     );
@@ -1226,7 +1226,7 @@ fn parse_set() {
         Statement::SetVariable {
             local: false,
             hivevar: false,
-            variable: ObjectName(vec![Ident::new("a")]),
+            variables: OneOrManyWithParens::One(ObjectName(vec![Ident::new("a")])),
             value: vec![Expr::Value(number("0"))],
         }
     );
@@ -1237,7 +1237,7 @@ fn parse_set() {
         Statement::SetVariable {
             local: false,
             hivevar: false,
-            variable: ObjectName(vec![Ident::new("a")]),
+            variables: OneOrManyWithParens::One(ObjectName(vec![Ident::new("a")])),
             value: vec![Expr::Identifier(Ident {
                 value: "DEFAULT".into(),
                 quote_style: None
@@ -1251,7 +1251,7 @@ fn parse_set() {
         Statement::SetVariable {
             local: true,
             hivevar: false,
-            variable: ObjectName(vec![Ident::new("a")]),
+            variables: OneOrManyWithParens::One(ObjectName(vec![Ident::new("a")])),
             value: vec![Expr::Identifier("b".into())],
         }
     );
@@ -1262,7 +1262,11 @@ fn parse_set() {
         Statement::SetVariable {
             local: false,
             hivevar: false,
-            variable: ObjectName(vec![Ident::new("a"), Ident::new("b"), Ident::new("c")]),
+            variables: OneOrManyWithParens::One(ObjectName(vec![
+                Ident::new("a"),
+                Ident::new("b"),
+                Ident::new("c")
+            ])),
             value: vec![Expr::Identifier(Ident {
                 value: "b".into(),
                 quote_style: None
@@ -1279,13 +1283,13 @@ fn parse_set() {
         Statement::SetVariable {
             local: false,
             hivevar: false,
-            variable: ObjectName(vec![
+            variables: OneOrManyWithParens::One(ObjectName(vec![
                 Ident::new("hive"),
                 Ident::new("tez"),
                 Ident::new("auto"),
                 Ident::new("reducer"),
                 Ident::new("parallelism")
-            ]),
+            ])),
             value: vec![Expr::Value(Value::Boolean(false))],
         }
     );
@@ -1869,9 +1873,11 @@ fn parse_array_index_expr() {
     let sql = "SELECT foo[0] FROM foos";
     let select = pg_and_generic().verified_only_select(sql);
     assert_eq!(
-        &Expr::ArrayIndex {
-            obj: Box::new(Expr::Identifier(Ident::new("foo"))),
-            indexes: vec![num[0].clone()],
+        &Expr::Subscript {
+            expr: Box::new(Expr::Identifier(Ident::new("foo"))),
+            subscript: Box::new(Subscript::Index {
+                index: num[0].clone()
+            }),
         },
         expr_from_projection(only(&select.projection)),
     );
@@ -1879,9 +1885,16 @@ fn parse_array_index_expr() {
     let sql = "SELECT foo[0][0] FROM foos";
     let select = pg_and_generic().verified_only_select(sql);
     assert_eq!(
-        &Expr::ArrayIndex {
-            obj: Box::new(Expr::Identifier(Ident::new("foo"))),
-            indexes: vec![num[0].clone(), num[0].clone()],
+        &Expr::Subscript {
+            expr: Box::new(Expr::Subscript {
+                expr: Box::new(Expr::Identifier(Ident::new("foo"))),
+                subscript: Box::new(Subscript::Index {
+                    index: num[0].clone()
+                }),
+            }),
+            subscript: Box::new(Subscript::Index {
+                index: num[0].clone()
+            }),
         },
         expr_from_projection(only(&select.projection)),
     );
@@ -1889,19 +1902,27 @@ fn parse_array_index_expr() {
     let sql = r#"SELECT bar[0]["baz"]["fooz"] FROM foos"#;
     let select = pg_and_generic().verified_only_select(sql);
     assert_eq!(
-        &Expr::ArrayIndex {
-            obj: Box::new(Expr::Identifier(Ident::new("bar"))),
-            indexes: vec![
-                num[0].clone(),
-                Expr::Identifier(Ident {
-                    value: "baz".to_string(),
-                    quote_style: Some('"')
+        &Expr::Subscript {
+            expr: Box::new(Expr::Subscript {
+                expr: Box::new(Expr::Subscript {
+                    expr: Box::new(Expr::Identifier(Ident::new("bar"))),
+                    subscript: Box::new(Subscript::Index {
+                        index: num[0].clone()
+                    })
                 }),
-                Expr::Identifier(Ident {
+                subscript: Box::new(Subscript::Index {
+                    index: Expr::Identifier(Ident {
+                        value: "baz".to_string(),
+                        quote_style: Some('"')
+                    })
+                })
+            }),
+            subscript: Box::new(Subscript::Index {
+                index: Expr::Identifier(Ident {
                     value: "fooz".to_string(),
                     quote_style: Some('"')
                 })
-            ],
+            })
         },
         expr_from_projection(only(&select.projection)),
     );
@@ -1909,26 +1930,33 @@ fn parse_array_index_expr() {
     let sql = "SELECT (CAST(ARRAY[ARRAY[2, 3]] AS INT[][]))[1][2]";
     let select = pg_and_generic().verified_only_select(sql);
     assert_eq!(
-        &Expr::ArrayIndex {
-            obj: Box::new(Expr::Nested(Box::new(Expr::Cast {
-                kind: CastKind::Cast,
-                expr: Box::new(Expr::Array(Array {
-                    elem: vec![Expr::Array(Array {
-                        elem: vec![num[2].clone(), num[3].clone(),],
+        &Expr::Subscript {
+            expr: Box::new(Expr::Subscript {
+                expr: Box::new(Expr::Nested(Box::new(Expr::Cast {
+                    kind: CastKind::Cast,
+                    expr: Box::new(Expr::Array(Array {
+                        elem: vec![Expr::Array(Array {
+                            elem: vec![num[2].clone(), num[3].clone(),],
+                            named: true,
+                        })],
                         named: true,
-                    })],
-                    named: true,
-                })),
-                data_type: DataType::Array(ArrayElemTypeDef::SquareBracket(
-                    Box::new(DataType::Array(ArrayElemTypeDef::SquareBracket(
-                        Box::new(DataType::Int(None)),
+                    })),
+                    data_type: DataType::Array(ArrayElemTypeDef::SquareBracket(
+                        Box::new(DataType::Array(ArrayElemTypeDef::SquareBracket(
+                            Box::new(DataType::Int(None)),
+                            None
+                        ))),
                         None
-                    ))),
-                    None
-                )),
-                format: None,
-            }))),
-            indexes: vec![num[1].clone(), num[2].clone()],
+                    )),
+                    format: None,
+                }))),
+                subscript: Box::new(Subscript::Index {
+                    index: num[1].clone()
+                }),
+            }),
+            subscript: Box::new(Subscript::Index {
+                index: num[2].clone()
+            }),
         },
         expr_from_projection(only(&select.projection)),
     );
@@ -1945,10 +1973,120 @@ fn parse_array_index_expr() {
 }
 
 #[test]
+fn parse_array_subscript() {
+    let tests = [
+        (
+            "(ARRAY[1, 2, 3, 4, 5, 6])[2]",
+            Subscript::Index {
+                index: Expr::Value(number("2")),
+            },
+        ),
+        (
+            "(ARRAY[1, 2, 3, 4, 5, 6])[foo]",
+            Subscript::Index {
+                index: Expr::Identifier(Ident::new("foo")),
+            },
+        ),
+        (
+            "(ARRAY[1, 2, 3, 4, 5, 6])[2:5]",
+            Subscript::Slice {
+                lower_bound: Some(Expr::Value(number("2"))),
+                upper_bound: Some(Expr::Value(number("5"))),
+                stride: None,
+            },
+        ),
+        (
+            "(ARRAY[1, 2, 3, 4, 5, 6])[2:5:3]",
+            Subscript::Slice {
+                lower_bound: Some(Expr::Value(number("2"))),
+                upper_bound: Some(Expr::Value(number("5"))),
+                stride: Some(Expr::Value(number("3"))),
+            },
+        ),
+        (
+            "arr[array_length(arr) - 3:array_length(arr) - 1]",
+            Subscript::Slice {
+                lower_bound: Some(Expr::BinaryOp {
+                    left: Box::new(call("array_length", [Expr::Identifier(Ident::new("arr"))])),
+                    op: BinaryOperator::Minus,
+                    right: Box::new(Expr::Value(number("3"))),
+                }),
+                upper_bound: Some(Expr::BinaryOp {
+                    left: Box::new(call("array_length", [Expr::Identifier(Ident::new("arr"))])),
+                    op: BinaryOperator::Minus,
+                    right: Box::new(Expr::Value(number("1"))),
+                }),
+                stride: None,
+            },
+        ),
+        (
+            "(ARRAY[1, 2, 3, 4, 5, 6])[:5]",
+            Subscript::Slice {
+                lower_bound: None,
+                upper_bound: Some(Expr::Value(number("5"))),
+                stride: None,
+            },
+        ),
+        (
+            "(ARRAY[1, 2, 3, 4, 5, 6])[2:]",
+            Subscript::Slice {
+                lower_bound: Some(Expr::Value(number("2"))),
+                upper_bound: None,
+                stride: None,
+            },
+        ),
+        (
+            "(ARRAY[1, 2, 3, 4, 5, 6])[:]",
+            Subscript::Slice {
+                lower_bound: None,
+                upper_bound: None,
+                stride: None,
+            },
+        ),
+    ];
+    for (sql, expect) in tests {
+        let Expr::Subscript { subscript, .. } = pg_and_generic().verified_expr(sql) else {
+            panic!("expected subscript expr");
+        };
+        assert_eq!(expect, *subscript);
+    }
+
+    pg_and_generic().verified_expr("schedule[:2][2:]");
+}
+
+#[test]
+fn parse_array_multi_subscript() {
+    let expr = pg_and_generic().verified_expr("make_array(1, 2, 3)[1:2][2]");
+    assert_eq!(
+        Expr::Subscript {
+            expr: Box::new(Expr::Subscript {
+                expr: Box::new(call(
+                    "make_array",
+                    vec![
+                        Expr::Value(number("1")),
+                        Expr::Value(number("2")),
+                        Expr::Value(number("3"))
+                    ]
+                )),
+                subscript: Box::new(Subscript::Slice {
+                    lower_bound: Some(Expr::Value(number("1"))),
+                    upper_bound: Some(Expr::Value(number("2"))),
+                    stride: None,
+                }),
+            }),
+            subscript: Box::new(Subscript::Index {
+                index: Expr::Value(number("2")),
+            }),
+        },
+        expr,
+    );
+}
+
+#[test]
 fn parse_create_index() {
     let sql = "CREATE INDEX IF NOT EXISTS my_index ON my_table(col1,col2)";
     match pg().verified_stmt(sql) {
-        Statement::CreateIndex {
+        Statement::CreateIndex(CreateIndex {
             name: Some(ObjectName(name)),
             table_name: ObjectName(table_name),
             using,
@@ -1959,7 +2097,7 @@ fn parse_create_index() {
             nulls_distinct: None,
             include,
             predicate: None,
-        } => {
+        }) => {
             assert_eq_vec(&["my_index"], &name);
             assert_eq_vec(&["my_table"], &table_name);
             assert_eq!(None, using);
@@ -1977,7 +2115,7 @@ fn parse_create_index() {
 fn parse_create_anonymous_index() {
     let sql = "CREATE INDEX ON my_table(col1,col2)";
     match pg().verified_stmt(sql) {
-        Statement::CreateIndex {
+        Statement::CreateIndex(CreateIndex {
             name,
             table_name: ObjectName(table_name),
             using,
@@ -1988,7 +2126,7 @@ fn parse_create_anonymous_index() {
             include,
             nulls_distinct: None,
             predicate: None,
-        } => {
+        }) => {
             assert_eq!(None, name);
             assert_eq_vec(&["my_table"], &table_name);
             assert_eq!(None, using);
@@ -2006,7 +2144,7 @@ fn parse_create_anonymous_index() {
 fn parse_create_index_concurrently() {
     let sql = "CREATE INDEX CONCURRENTLY IF NOT EXISTS my_index ON my_table(col1,col2)";
     match pg().verified_stmt(sql) {
-        Statement::CreateIndex {
+        Statement::CreateIndex(CreateIndex {
             name: Some(ObjectName(name)),
             table_name: ObjectName(table_name),
             using,
@@ -2017,7 +2155,7 @@ fn parse_create_index_concurrently() {
             include,
             nulls_distinct: None,
             predicate: None,
-        } => {
+        }) => {
             assert_eq_vec(&["my_index"], &name);
             assert_eq_vec(&["my_table"], &table_name);
             assert_eq!(None, using);
@@ -2035,7 +2173,7 @@ fn parse_create_index_concurrently() {
 fn parse_create_index_with_predicate() {
     let sql = "CREATE INDEX IF NOT EXISTS my_index ON my_table(col1,col2) WHERE col3 IS NULL";
     match pg().verified_stmt(sql) {
-        Statement::CreateIndex {
+        Statement::CreateIndex(CreateIndex {
             name: Some(ObjectName(name)),
             table_name: ObjectName(table_name),
             using,
@@ -2046,7 +2184,7 @@ fn parse_create_index_with_predicate() {
             include,
             nulls_distinct: None,
             predicate: Some(_),
-        } => {
+        }) => {
             assert_eq_vec(&["my_index"], &name);
             assert_eq_vec(&["my_table"], &table_name);
             assert_eq!(None, using);
@@ -2064,7 +2202,7 @@ fn parse_create_index_with_predicate() {
 fn parse_create_index_with_include() {
     let sql = "CREATE INDEX IF NOT EXISTS my_index ON my_table(col1,col2) INCLUDE (col3)";
     match pg().verified_stmt(sql) {
-        Statement::CreateIndex {
+        Statement::CreateIndex(CreateIndex {
             name: Some(ObjectName(name)),
             table_name: ObjectName(table_name),
             using,
@@ -2075,7 +2213,7 @@ fn parse_create_index_with_include() {
             include,
             nulls_distinct: None,
             predicate: None,
-        } => {
+        }) => {
             assert_eq_vec(&["my_index"], &name);
             assert_eq_vec(&["my_table"], &table_name);
             assert_eq!(None, using);
@@ -2093,7 +2231,7 @@ fn parse_create_index_with_include() {
 fn parse_create_index_with_nulls_distinct() {
     let sql = "CREATE INDEX IF NOT EXISTS my_index ON my_table(col1,col2) NULLS NOT DISTINCT";
     match pg().verified_stmt(sql) {
-        Statement::CreateIndex {
+        Statement::CreateIndex(CreateIndex {
             name: Some(ObjectName(name)),
             table_name: ObjectName(table_name),
             using,
@@ -2104,7 +2242,7 @@ fn parse_create_index_with_nulls_distinct() {
             include,
             nulls_distinct: Some(nulls_distinct),
             predicate: None,
-        } => {
+        }) => {
             assert_eq_vec(&["my_index"], &name);
             assert_eq_vec(&["my_table"], &table_name);
             assert_eq!(None, using);
@@ -2120,7 +2258,7 @@ fn parse_create_index_with_nulls_distinct() {
 
     let sql = "CREATE INDEX IF NOT EXISTS my_index ON my_table(col1,col2) NULLS DISTINCT";
     match pg().verified_stmt(sql) {
-        Statement::CreateIndex {
+        Statement::CreateIndex(CreateIndex {
             name: Some(ObjectName(name)),
             table_name: ObjectName(table_name),
             using,
@@ -2131,7 +2269,7 @@ fn parse_create_index_with_nulls_distinct() {
             include,
             nulls_distinct: Some(nulls_distinct),
             predicate: None,
-        } => {
+        }) => {
             assert_eq_vec(&["my_index"], &name);
             assert_eq_vec(&["my_table"], &table_name);
             assert_eq!(None, using);
@@ -3281,16 +3419,18 @@ fn parse_create_function() {
                 OperateFunctionArg::unnamed(DataType::Integer(None)),
             ]),
             return_type: Some(DataType::Integer(None)),
-            params: CreateFunctionBody {
-                language: Some("SQL".into()),
-                behavior: Some(FunctionBehavior::Immutable),
-                called_on_null: Some(FunctionCalledOnNull::Strict),
-                parallel: Some(FunctionParallel::Safe),
-                as_: Some(FunctionDefinition::SingleQuotedDef(
-                    "select $1 + $2;".into()
-                )),
-                ..Default::default()
-            },
+            language: Some("SQL".into()),
+            behavior: Some(FunctionBehavior::Immutable),
+            called_on_null: Some(FunctionCalledOnNull::Strict),
+            parallel: Some(FunctionParallel::Safe),
+            function_body: Some(CreateFunctionBody::AsBeforeOptions(Expr::Value(
+                Value::SingleQuotedString("select $1 + $2;".into())
+            ))),
+            if_not_exists: false,
+            using: None,
+            determinism_specifier: None,
+            options: None,
+            remote_connection: None,
         }
     );
 }
@@ -3564,7 +3704,7 @@ fn parse_create_table_with_alias() {
       bool_col BOOL
     );";
     match pg_and_generic().one_statement_parses_to(sql, "") {
-        Statement::CreateTable {
+        Statement::CreateTable(CreateTable {
             name,
             columns,
             constraints,
@@ -3574,7 +3714,7 @@ fn parse_create_table_with_alias() {
             file_format: None,
             location: None,
             ..
-        } => {
+        }) => {
             assert_eq!("public.datatype_aliases", name.to_string());
             assert_eq!(
                 columns,
@@ -3877,4 +4017,44 @@ fn parse_mat_cte() {
 
     let sql2 = r#"WITH cte AS NOT MATERIALIZED (SELECT id FROM accounts) SELECT id FROM cte"#;
     pg().verified_stmt(sql2);
+}
+
+#[test]
+fn parse_at_time_zone() {
+    pg_and_generic().verified_expr("CURRENT_TIMESTAMP AT TIME ZONE tz");
+    pg_and_generic().verified_expr("CURRENT_TIMESTAMP AT TIME ZONE ('America/' || 'Los_Angeles')");
+
+    // check precedence
+    let expr = Expr::BinaryOp {
+        left: Box::new(Expr::AtTimeZone {
+            timestamp: Box::new(Expr::TypedString {
+                data_type: DataType::Timestamp(None, TimezoneInfo::None),
+                value: "2001-09-28 01:00".to_owned(),
+            }),
+            time_zone: Box::new(Expr::Cast {
+                kind: CastKind::DoubleColon,
+                expr: Box::new(Expr::Value(Value::SingleQuotedString(
+                    "America/Los_Angeles".to_owned(),
+                ))),
+                data_type: DataType::Text,
+                format: None,
+            }),
+        }),
+        op: BinaryOperator::Plus,
+        right: Box::new(Expr::Interval(Interval {
+            value: Box::new(Expr::Value(Value::SingleQuotedString(
+                "23 hours".to_owned(),
+            ))),
+            leading_field: None,
+            leading_precision: None,
+            last_field: None,
+            fractional_seconds_precision: None,
+        })),
+    };
+    pretty_assertions::assert_eq!(
+        pg_and_generic().verified_expr(
+            "TIMESTAMP '2001-09-28 01:00' AT TIME ZONE 'America/Los_Angeles'::TEXT + INTERVAL '23 hours'",
+        ),
+        expr
+    );
 }

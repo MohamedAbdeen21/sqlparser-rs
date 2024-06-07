@@ -25,9 +25,9 @@ use sqlparser::ast::SelectItem::UnnamedExpr;
 use sqlparser::ast::TableFactor::{Pivot, Unpivot};
 use sqlparser::ast::*;
 use sqlparser::dialect::{
-    AnsiDialect, BigQueryDialect, ClickHouseDialect, Dialect, DuckDbDialect, GenericDialect,
-    HiveDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, RedshiftSqlDialect, SQLiteDialect,
-    SnowflakeDialect,
+    AnsiDialect, BigQueryDialect, ClickHouseDialect, DatabricksDialect, Dialect, DuckDbDialect,
+    GenericDialect, HiveDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, RedshiftSqlDialect,
+    SQLiteDialect, SnowflakeDialect,
 };
 use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::{Parser, ParserError, ParserOptions};
@@ -1380,7 +1380,11 @@ fn pg_and_generic() -> TestedDialects {
 fn parse_json_ops_without_colon() {
     use self::BinaryOperator::*;
     let binary_ops = [
-        ("->", Arrow, all_dialects()),
+        (
+            "->",
+            Arrow,
+            all_dialects_except(|d| d.supports_lambda_functions()),
+        ),
         ("->>", LongArrow, all_dialects()),
         ("#>", HashArrow, pg_and_generic()),
         ("#>>", HashLongArrow, pg_and_generic()),
@@ -2743,7 +2747,7 @@ fn parse_create_table() {
          FOREIGN KEY (lng) REFERENCES othertable4(longitude) ON UPDATE SET NULL)",
     );
     match ast {
-        Statement::CreateTable {
+        Statement::CreateTable(CreateTable {
             name,
             columns,
             constraints,
@@ -2753,7 +2757,7 @@ fn parse_create_table() {
             file_format: None,
             location: None,
             ..
-        } => {
+        }) => {
             assert_eq!("uk_cities", name.to_string());
             assert_eq!(
                 columns,
@@ -2932,7 +2936,7 @@ fn parse_create_table_with_constraint_characteristics() {
          FOREIGN KEY (lng) REFERENCES othertable4(longitude) ON UPDATE SET NULL NOT DEFERRABLE INITIALLY IMMEDIATE ENFORCED)",
     );
     match ast {
-        Statement::CreateTable {
+        Statement::CreateTable(CreateTable {
             name,
             columns,
             constraints,
@@ -2942,7 +2946,7 @@ fn parse_create_table_with_constraint_characteristics() {
             file_format: None,
             location: None,
             ..
-        } => {
+        }) => {
             assert_eq!("uk_cities", name.to_string());
             assert_eq!(
                 columns,
@@ -3100,7 +3104,7 @@ fn parse_create_table_column_constraint_characteristics() {
         };
 
         match ast {
-            Statement::CreateTable { columns, .. } => {
+            Statement::CreateTable(CreateTable { columns, .. }) => {
                 assert_eq!(
                     columns,
                     vec![ColumnDef {
@@ -3210,12 +3214,12 @@ fn parse_create_table_hive_array() {
         };
 
         match dialects.one_statement_parses_to(sql.as_str(), sql.as_str()) {
-            Statement::CreateTable {
+            Statement::CreateTable(CreateTable {
                 if_not_exists,
                 name,
                 columns,
                 ..
-            } => {
+            }) => {
                 assert!(if_not_exists);
                 assert_eq!(name, ObjectName(vec!["something".into()]));
                 assert_eq!(
@@ -3369,7 +3373,7 @@ fn parse_create_table_as() {
     let sql = "CREATE TABLE t AS SELECT * FROM a";
 
     match verified_stmt(sql) {
-        Statement::CreateTable { name, query, .. } => {
+        Statement::CreateTable(CreateTable { name, query, .. }) => {
             assert_eq!(name.to_string(), "t".to_string());
             assert_eq!(query, Some(Box::new(verified_query("SELECT * FROM a"))));
         }
@@ -3381,7 +3385,7 @@ fn parse_create_table_as() {
     // (without data types) in a CTAS, but we have yet to support that.
     let sql = "CREATE TABLE t (a INT, b INT) AS SELECT 1 AS b, 2 AS a";
     match verified_stmt(sql) {
-        Statement::CreateTable { columns, query, .. } => {
+        Statement::CreateTable(CreateTable { columns, query, .. }) => {
             assert_eq!(columns.len(), 2);
             assert_eq!(columns[0].to_string(), "a INT".to_string());
             assert_eq!(columns[1].to_string(), "b INT".to_string());
@@ -3414,7 +3418,7 @@ fn parse_create_table_as_table() {
     });
 
     match verified_stmt(sql1) {
-        Statement::CreateTable { query, name, .. } => {
+        Statement::CreateTable(CreateTable { query, name, .. }) => {
             assert_eq!(name, ObjectName(vec![Ident::new("new_table")]));
             assert_eq!(query.unwrap(), expected_query1);
         }
@@ -3439,7 +3443,7 @@ fn parse_create_table_as_table() {
     });
 
     match verified_stmt(sql2) {
-        Statement::CreateTable { query, name, .. } => {
+        Statement::CreateTable(CreateTable { query, name, .. }) => {
             assert_eq!(name, ObjectName(vec![Ident::new("new_table")]));
             assert_eq!(query.unwrap(), expected_query2);
         }
@@ -3452,7 +3456,7 @@ fn parse_create_table_on_cluster() {
     // Using single-quote literal to define current cluster
     let sql = "CREATE TABLE t ON CLUSTER '{cluster}' (a INT, b INT)";
     match verified_stmt(sql) {
-        Statement::CreateTable { on_cluster, .. } => {
+        Statement::CreateTable(CreateTable { on_cluster, .. }) => {
             assert_eq!(on_cluster.unwrap(), "{cluster}".to_string());
         }
         _ => unreachable!(),
@@ -3461,7 +3465,7 @@ fn parse_create_table_on_cluster() {
     // Using explicitly declared cluster name
     let sql = "CREATE TABLE t ON CLUSTER my_cluster (a INT, b INT)";
     match verified_stmt(sql) {
-        Statement::CreateTable { on_cluster, .. } => {
+        Statement::CreateTable(CreateTable { on_cluster, .. }) => {
             assert_eq!(on_cluster.unwrap(), "my_cluster".to_string());
         }
         _ => unreachable!(),
@@ -3473,9 +3477,9 @@ fn parse_create_or_replace_table() {
     let sql = "CREATE OR REPLACE TABLE t (a INT)";
 
     match verified_stmt(sql) {
-        Statement::CreateTable {
+        Statement::CreateTable(CreateTable {
             name, or_replace, ..
-        } => {
+        }) => {
             assert_eq!(name.to_string(), "t".to_string());
             assert!(or_replace);
         }
@@ -3484,7 +3488,7 @@ fn parse_create_or_replace_table() {
 
     let sql = "CREATE TABLE t (a INT, b INT) AS SELECT 1 AS b, 2 AS a";
     match verified_stmt(sql) {
-        Statement::CreateTable { columns, query, .. } => {
+        Statement::CreateTable(CreateTable { columns, query, .. }) => {
             assert_eq!(columns.len(), 2);
             assert_eq!(columns[0].to_string(), "a INT".to_string());
             assert_eq!(columns[1].to_string(), "b INT".to_string());
@@ -3515,7 +3519,7 @@ fn parse_create_table_with_on_delete_on_update_2in_any_order() -> Result<(), Par
 fn parse_create_table_with_options() {
     let sql = "CREATE TABLE t (c INT) WITH (foo = 'bar', a = 123)";
     match verified_stmt(sql) {
-        Statement::CreateTable { with_options, .. } => {
+        Statement::CreateTable(CreateTable { with_options, .. }) => {
             assert_eq!(
                 vec![
                     SqlOption {
@@ -3538,7 +3542,7 @@ fn parse_create_table_with_options() {
 fn parse_create_table_clone() {
     let sql = "CREATE OR REPLACE TABLE a CLONE a_tmp";
     match verified_stmt(sql) {
-        Statement::CreateTable { name, clone, .. } => {
+        Statement::CreateTable(CreateTable { name, clone, .. }) => {
             assert_eq!(ObjectName(vec![Ident::new("a")]), name);
             assert_eq!(Some(ObjectName(vec![(Ident::new("a_tmp"))])), clone)
         }
@@ -3573,7 +3577,7 @@ fn parse_create_external_table() {
          STORED AS TEXTFILE LOCATION '/tmp/example.csv'",
     );
     match ast {
-        Statement::CreateTable {
+        Statement::CreateTable(CreateTable {
             name,
             columns,
             constraints,
@@ -3583,7 +3587,7 @@ fn parse_create_external_table() {
             file_format,
             location,
             ..
-        } => {
+        }) => {
             assert_eq!("uk_cities", name.to_string());
             assert_eq!(
                 columns,
@@ -3644,7 +3648,7 @@ fn parse_create_or_replace_external_table() {
          STORED AS TEXTFILE LOCATION '/tmp/example.csv'",
     );
     match ast {
-        Statement::CreateTable {
+        Statement::CreateTable(CreateTable {
             name,
             columns,
             constraints,
@@ -3655,7 +3659,7 @@ fn parse_create_or_replace_external_table() {
             location,
             or_replace,
             ..
-        } => {
+        }) => {
             assert_eq!("uk_cities", name.to_string());
             assert_eq!(
                 columns,
@@ -3701,7 +3705,7 @@ fn parse_create_external_table_lowercase() {
          lng DOUBLE) \
          STORED AS PARQUET LOCATION '/tmp/example.csv'",
     );
-    assert_matches!(ast, Statement::CreateTable { .. });
+    assert_matches!(ast, Statement::CreateTable(CreateTable { .. }));
 }
 
 #[test]
@@ -4996,7 +5000,9 @@ fn parse_at_timezone() {
     assert_eq!(
         &Expr::AtTimeZone {
             timestamp: Box::new(call("FROM_UNIXTIME", [zero.clone()])),
-            time_zone: "UTC-06:00".to_string(),
+            time_zone: Box::new(Expr::Value(Value::SingleQuotedString(
+                "UTC-06:00".to_string()
+            ))),
         },
         expr_from_projection(only(&select.projection)),
     );
@@ -5010,7 +5016,9 @@ fn parse_at_timezone() {
                 [
                     Expr::AtTimeZone {
                         timestamp: Box::new(call("FROM_UNIXTIME", [zero])),
-                        time_zone: "UTC-06:00".to_string(),
+                        time_zone: Box::new(Expr::Value(Value::SingleQuotedString(
+                            "UTC-06:00".to_string()
+                        ))),
                     },
                     Expr::Value(Value::SingleQuotedString("%Y-%m-%dT%H".to_string()),)
                 ]
@@ -6179,7 +6187,8 @@ fn parse_exists_subquery() {
     verified_stmt("SELECT * FROM t WHERE EXISTS (WITH u AS (SELECT 1) SELECT * FROM u)");
     verified_stmt("SELECT EXISTS (SELECT 1)");
 
-    let res = parse_sql_statements("SELECT EXISTS (");
+    let res = all_dialects_except(|d| d.is::<DatabricksDialect>())
+        .parse_sql_statements("SELECT EXISTS (");
     assert_eq!(
         ParserError::ParserError(
             "Expected SELECT, VALUES, or a subquery in the query body, found: EOF".to_string()
@@ -6187,7 +6196,8 @@ fn parse_exists_subquery() {
         res.unwrap_err(),
     );
 
-    let res = parse_sql_statements("SELECT EXISTS (NULL)");
+    let res = all_dialects_except(|d| d.is::<DatabricksDialect>())
+        .parse_sql_statements("SELECT EXISTS (NULL)");
     assert_eq!(
         ParserError::ParserError(
             "Expected SELECT, VALUES, or a subquery in the query body, found: NULL".to_string()
@@ -6246,6 +6256,7 @@ fn parse_create_view() {
             materialized,
             options,
             cluster_by,
+            comment,
             with_no_schema_binding: late_binding,
             if_not_exists,
             temporary,
@@ -6257,6 +6268,7 @@ fn parse_create_view() {
             assert!(!or_replace);
             assert_eq!(options, CreateTableOptions::None);
             assert_eq!(cluster_by, vec![]);
+            assert!(comment.is_none());
             assert!(!late_binding);
             assert!(!if_not_exists);
             assert!(!temporary);
@@ -6300,6 +6312,7 @@ fn parse_create_view_with_columns() {
             query,
             materialized,
             cluster_by,
+            comment,
             with_no_schema_binding: late_binding,
             if_not_exists,
             temporary,
@@ -6311,6 +6324,7 @@ fn parse_create_view_with_columns() {
                     .into_iter()
                     .map(|name| ViewColumnDef {
                         name,
+                        data_type: None,
                         options: None
                     })
                     .collect::<Vec<_>>()
@@ -6320,6 +6334,7 @@ fn parse_create_view_with_columns() {
             assert!(!materialized);
             assert!(!or_replace);
             assert_eq!(cluster_by, vec![]);
+            assert!(comment.is_none());
             assert!(!late_binding);
             assert!(!if_not_exists);
             assert!(!temporary);
@@ -6340,6 +6355,7 @@ fn parse_create_view_temporary() {
             materialized,
             options,
             cluster_by,
+            comment,
             with_no_schema_binding: late_binding,
             if_not_exists,
             temporary,
@@ -6351,6 +6367,7 @@ fn parse_create_view_temporary() {
             assert!(!or_replace);
             assert_eq!(options, CreateTableOptions::None);
             assert_eq!(cluster_by, vec![]);
+            assert!(comment.is_none());
             assert!(!late_binding);
             assert!(!if_not_exists);
             assert!(temporary);
@@ -6371,6 +6388,7 @@ fn parse_create_or_replace_view() {
             query,
             materialized,
             cluster_by,
+            comment,
             with_no_schema_binding: late_binding,
             if_not_exists,
             temporary,
@@ -6382,6 +6400,7 @@ fn parse_create_or_replace_view() {
             assert!(!materialized);
             assert!(or_replace);
             assert_eq!(cluster_by, vec![]);
+            assert!(comment.is_none());
             assert!(!late_binding);
             assert!(!if_not_exists);
             assert!(!temporary);
@@ -6406,6 +6425,7 @@ fn parse_create_or_replace_materialized_view() {
             query,
             materialized,
             cluster_by,
+            comment,
             with_no_schema_binding: late_binding,
             if_not_exists,
             temporary,
@@ -6417,6 +6437,7 @@ fn parse_create_or_replace_materialized_view() {
             assert!(materialized);
             assert!(or_replace);
             assert_eq!(cluster_by, vec![]);
+            assert!(comment.is_none());
             assert!(!late_binding);
             assert!(!if_not_exists);
             assert!(!temporary);
@@ -6437,6 +6458,7 @@ fn parse_create_materialized_view() {
             materialized,
             options,
             cluster_by,
+            comment,
             with_no_schema_binding: late_binding,
             if_not_exists,
             temporary,
@@ -6448,6 +6470,7 @@ fn parse_create_materialized_view() {
             assert_eq!(options, CreateTableOptions::None);
             assert!(!or_replace);
             assert_eq!(cluster_by, vec![]);
+            assert!(comment.is_none());
             assert!(!late_binding);
             assert!(!if_not_exists);
             assert!(!temporary);
@@ -6468,6 +6491,7 @@ fn parse_create_materialized_view_with_cluster_by() {
             materialized,
             options,
             cluster_by,
+            comment,
             with_no_schema_binding: late_binding,
             if_not_exists,
             temporary,
@@ -6479,6 +6503,7 @@ fn parse_create_materialized_view_with_cluster_by() {
             assert_eq!(options, CreateTableOptions::None);
             assert!(!or_replace);
             assert_eq!(cluster_by, vec![Ident::new("foo")]);
+            assert!(comment.is_none());
             assert!(!late_binding);
             assert!(!if_not_exists);
             assert!(!temporary);
@@ -6957,12 +6982,15 @@ fn parse_set_variable() {
         Statement::SetVariable {
             local,
             hivevar,
-            variable,
+            variables,
             value,
         } => {
             assert!(!local);
             assert!(!hivevar);
-            assert_eq!(variable, ObjectName(vec!["SOMETHING".into()]));
+            assert_eq!(
+                variables,
+                OneOrManyWithParens::One(ObjectName(vec!["SOMETHING".into()]))
+            );
             assert_eq!(
                 value,
                 vec![Expr::Value(Value::SingleQuotedString("1".into()))]
@@ -6971,7 +6999,74 @@ fn parse_set_variable() {
         _ => unreachable!(),
     }
 
+    let multi_variable_dialects = all_dialects_where(|d| d.supports_parenthesized_set_variables());
+    let sql = r#"SET (a, b, c) = (1, 2, 3)"#;
+    match multi_variable_dialects.verified_stmt(sql) {
+        Statement::SetVariable {
+            local,
+            hivevar,
+            variables,
+            value,
+        } => {
+            assert!(!local);
+            assert!(!hivevar);
+            assert_eq!(
+                variables,
+                OneOrManyWithParens::Many(vec![
+                    ObjectName(vec!["a".into()]),
+                    ObjectName(vec!["b".into()]),
+                    ObjectName(vec!["c".into()]),
+                ])
+            );
+            assert_eq!(
+                value,
+                vec![
+                    Expr::Value(number("1")),
+                    Expr::Value(number("2")),
+                    Expr::Value(number("3")),
+                ]
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let error_sqls = [
+        ("SET (a, b, c) = (1, 2, 3", "Expected ), found: EOF"),
+        ("SET (a, b, c) = 1, 2, 3", "Expected (, found: 1"),
+    ];
+    for (sql, error) in error_sqls {
+        assert_eq!(
+            ParserError::ParserError(error.to_string()),
+            multi_variable_dialects
+                .parse_sql_statements(sql)
+                .unwrap_err()
+        );
+    }
+
     one_statement_parses_to("SET SOMETHING TO '1'", "SET SOMETHING = '1'");
+}
+
+#[test]
+fn parse_double_colon_cast_at_timezone() {
+    let sql = "SELECT '2001-01-01T00:00:00.000Z'::TIMESTAMP AT TIME ZONE 'Europe/Brussels' FROM t";
+    let select = verified_only_select(sql);
+
+    assert_eq!(
+        &Expr::AtTimeZone {
+            timestamp: Box::new(Expr::Cast {
+                kind: CastKind::DoubleColon,
+                expr: Box::new(Expr::Value(Value::SingleQuotedString(
+                    "2001-01-01T00:00:00.000Z".to_string()
+                ),)),
+                data_type: DataType::Timestamp(None, TimezoneInfo::None),
+                format: None
+            }),
+            time_zone: Box::new(Expr::Value(Value::SingleQuotedString(
+                "Europe/Brussels".to_string()
+            ))),
+        },
+        expr_from_projection(only(&select.projection)),
+    );
 }
 
 #[test]
@@ -6980,12 +7075,15 @@ fn parse_set_time_zone() {
         Statement::SetVariable {
             local,
             hivevar,
-            variable,
+            variables: variable,
             value,
         } => {
             assert!(!local);
             assert!(!hivevar);
-            assert_eq!(variable, ObjectName(vec!["TIMEZONE".into()]));
+            assert_eq!(
+                variable,
+                OneOrManyWithParens::One(ObjectName(vec!["TIMEZONE".into()]))
+            );
             assert_eq!(
                 value,
                 vec![Expr::Value(Value::SingleQuotedString("UTC".into()))]
@@ -7117,14 +7215,14 @@ fn parse_create_index() {
         },
     ];
     match verified_stmt(sql) {
-        Statement::CreateIndex {
+        Statement::CreateIndex(CreateIndex {
             name: Some(name),
             table_name,
             columns,
             unique,
             if_not_exists,
             ..
-        } => {
+        }) => {
             assert_eq!("idx_name", name.to_string());
             assert_eq!("test", table_name.to_string());
             assert_eq!(indexed_columns, columns);
@@ -7151,7 +7249,7 @@ fn test_create_index_with_using_function() {
         },
     ];
     match verified_stmt(sql) {
-        Statement::CreateIndex {
+        Statement::CreateIndex(CreateIndex {
             name: Some(name),
             table_name,
             using,
@@ -7162,7 +7260,7 @@ fn test_create_index_with_using_function() {
             include,
             nulls_distinct: None,
             predicate: None,
-        } => {
+        }) => {
             assert_eq!("idx_name", name.to_string());
             assert_eq!("test", table_name.to_string());
             assert_eq!("btree", using.unwrap().to_string());
@@ -8540,7 +8638,7 @@ fn parse_pivot_table() {
                 expected_function("c", Some("u")),
             ],
             value_column: vec![Ident::new("a"), Ident::new("MONTH")],
-            pivot_values: vec![
+            value_source: PivotValueSource::List(vec![
                 ExprWithAlias {
                     expr: Expr::Value(number("1")),
                     alias: Some(Ident::new("x"))
@@ -8553,7 +8651,8 @@ fn parse_pivot_table() {
                     expr: Expr::Identifier(Ident::new("three")),
                     alias: Some(Ident::new("y"))
                 },
-            ],
+            ]),
+            default_on_null: None,
             alias: Some(TableAlias {
                 name: Ident {
                     value: "p".to_string(),
@@ -8691,7 +8790,7 @@ fn parse_pivot_unpivot_table() {
                 alias: None
             }],
             value_column: vec![Ident::new("year")],
-            pivot_values: vec![
+            value_source: PivotValueSource::List(vec![
                 ExprWithAlias {
                     expr: Expr::Value(Value::SingleQuotedString("population_2000".to_string())),
                     alias: None
@@ -8700,7 +8799,8 @@ fn parse_pivot_unpivot_table() {
                     expr: Expr::Value(Value::SingleQuotedString("population_2010".to_string())),
                     alias: None
                 },
-            ],
+            ]),
+            default_on_null: None,
             alias: Some(TableAlias {
                 name: Ident::new("p"),
                 columns: vec![]
@@ -9797,4 +9897,87 @@ fn parse_within_group() {
         "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY sales_amount) ",
         "OVER (PARTITION BY department)",
     ));
+}
+
+#[test]
+fn tests_select_values_without_parens() {
+    let dialects = TestedDialects {
+        dialects: vec![
+            Box::new(GenericDialect {}),
+            Box::new(SnowflakeDialect {}),
+            Box::new(DatabricksDialect {}),
+        ],
+        options: None,
+    };
+    let sql = "SELECT * FROM VALUES (1, 2), (2,3) AS tbl (id, val)";
+    let canonical = "SELECT * FROM (VALUES (1, 2), (2, 3)) AS tbl (id, val)";
+    dialects.verified_only_select_with_canonical(sql, canonical);
+}
+
+#[test]
+fn tests_select_values_without_parens_and_set_op() {
+    let dialects = TestedDialects {
+        dialects: vec![
+            Box::new(GenericDialect {}),
+            Box::new(SnowflakeDialect {}),
+            Box::new(DatabricksDialect {}),
+        ],
+        options: None,
+    };
+    let sql = "SELECT id + 1, name FROM VALUES (1, 'Apple'), (2, 'Banana'), (3, 'Orange') AS fruits (id, name) UNION ALL SELECT 5, 'Strawberry'";
+    let canonical = "SELECT id + 1, name FROM (VALUES (1, 'Apple'), (2, 'Banana'), (3, 'Orange')) AS fruits (id, name) UNION ALL SELECT 5, 'Strawberry'";
+    let query = dialects.verified_query_with_canonical(sql, canonical);
+    match *query.body {
+        SetExpr::SetOperation {
+            op,
+            set_quantifier: _,
+            left,
+            right,
+        } => {
+            assert_eq!(SetOperator::Union, op);
+            match *left {
+                SetExpr::Select(_) => {}
+                _ => panic!("Expected a SELECT statement"),
+            }
+            match *right {
+                SetExpr::Select(_) => {}
+                _ => panic!("Expected a SELECT statement"),
+            }
+        }
+        _ => panic!("Expected a SET OPERATION"),
+    }
+}
+
+#[test]
+fn parse_select_wildcard_with_except() {
+    let dialects = all_dialects_where(|d| d.supports_select_wildcard_except());
+
+    let select = dialects.verified_only_select("SELECT * EXCEPT (col_a) FROM data");
+    let expected = SelectItem::Wildcard(WildcardAdditionalOptions {
+        opt_except: Some(ExceptSelectItem {
+            first_element: Ident::new("col_a"),
+            additional_elements: vec![],
+        }),
+        ..Default::default()
+    });
+    assert_eq!(expected, select.projection[0]);
+
+    let select = dialects
+        .verified_only_select("SELECT * EXCEPT (department_id, employee_id) FROM employee_table");
+    let expected = SelectItem::Wildcard(WildcardAdditionalOptions {
+        opt_except: Some(ExceptSelectItem {
+            first_element: Ident::new("department_id"),
+            additional_elements: vec![Ident::new("employee_id")],
+        }),
+        ..Default::default()
+    });
+    assert_eq!(expected, select.projection[0]);
+
+    assert_eq!(
+        dialects
+            .parse_sql_statements("SELECT * EXCEPT () FROM employee_table")
+            .unwrap_err()
+            .to_string(),
+        "sql parser error: Expected identifier, found: )"
+    );
 }

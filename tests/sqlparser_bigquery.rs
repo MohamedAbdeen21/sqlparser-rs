@@ -18,14 +18,30 @@ use std::ops::Deref;
 
 use sqlparser::ast::*;
 use sqlparser::dialect::{BigQueryDialect, GenericDialect};
-use sqlparser::parser::ParserError;
+use sqlparser::parser::{ParserError, ParserOptions};
 use test_utils::*;
 
 #[test]
 fn parse_literal_string() {
-    let sql = r#"SELECT 'single', "double""#;
-    let select = bigquery().verified_only_select(sql);
-    assert_eq!(2, select.projection.len());
+    let sql = concat!(
+        "SELECT ",
+        "'single', ",
+        r#""double", "#,
+        "'''triple-single''', ",
+        r#""""triple-double""", "#,
+        r#"'single\'escaped', "#,
+        r#"'''triple-single\'escaped''', "#,
+        r#"'''triple-single'unescaped''', "#,
+        r#""double\"escaped", "#,
+        r#""""triple-double\"escaped""", "#,
+        r#""""triple-double"unescaped""""#,
+    );
+    let dialect = TestedDialects {
+        dialects: vec![Box::new(BigQueryDialect {})],
+        options: Some(ParserOptions::new().with_unescape(false)),
+    };
+    let select = dialect.verified_only_select(sql);
+    assert_eq!(10, select.projection.len());
     assert_eq!(
         &Expr::Value(Value::SingleQuotedString("single".to_string())),
         expr_from_projection(&select.projection[0])
@@ -34,56 +50,162 @@ fn parse_literal_string() {
         &Expr::Value(Value::DoubleQuotedString("double".to_string())),
         expr_from_projection(&select.projection[1])
     );
+    assert_eq!(
+        &Expr::Value(Value::TripleSingleQuotedString("triple-single".to_string())),
+        expr_from_projection(&select.projection[2])
+    );
+    assert_eq!(
+        &Expr::Value(Value::TripleDoubleQuotedString("triple-double".to_string())),
+        expr_from_projection(&select.projection[3])
+    );
+    assert_eq!(
+        &Expr::Value(Value::SingleQuotedString(r#"single\'escaped"#.to_string())),
+        expr_from_projection(&select.projection[4])
+    );
+    assert_eq!(
+        &Expr::Value(Value::TripleSingleQuotedString(
+            r#"triple-single\'escaped"#.to_string()
+        )),
+        expr_from_projection(&select.projection[5])
+    );
+    assert_eq!(
+        &Expr::Value(Value::TripleSingleQuotedString(
+            r#"triple-single'unescaped"#.to_string()
+        )),
+        expr_from_projection(&select.projection[6])
+    );
+    assert_eq!(
+        &Expr::Value(Value::DoubleQuotedString(r#"double\"escaped"#.to_string())),
+        expr_from_projection(&select.projection[7])
+    );
+    assert_eq!(
+        &Expr::Value(Value::TripleDoubleQuotedString(
+            r#"triple-double\"escaped"#.to_string()
+        )),
+        expr_from_projection(&select.projection[8])
+    );
+    assert_eq!(
+        &Expr::Value(Value::TripleDoubleQuotedString(
+            r#"triple-double"unescaped"#.to_string()
+        )),
+        expr_from_projection(&select.projection[9])
+    );
 }
 
 #[test]
 fn parse_byte_literal() {
-    let sql = r#"SELECT B'abc', B"abc""#;
-    let select = bigquery().verified_only_select(sql);
-    assert_eq!(2, select.projection.len());
-    assert_eq!(
-        &Expr::Value(Value::SingleQuotedByteStringLiteral("abc".to_string())),
-        expr_from_projection(&select.projection[0])
+    let sql = concat!(
+        "SELECT ",
+        "B'abc', ",
+        r#"B"abc", "#,
+        r#"B'f\(abc,(.*),def\)', "#,
+        r#"B"f\(abc,(.*),def\)", "#,
+        r#"B'''abc''', "#,
+        r#"B"""abc""""#,
     );
-    assert_eq!(
-        &Expr::Value(Value::DoubleQuotedByteStringLiteral("abc".to_string())),
-        expr_from_projection(&select.projection[1])
-    );
+    let stmt = bigquery().verified_stmt(sql);
+    if let Statement::Query(query) = stmt {
+        if let SetExpr::Select(select) = *query.body {
+            assert_eq!(6, select.projection.len());
+            assert_eq!(
+                &Expr::Value(Value::SingleQuotedByteStringLiteral("abc".to_string())),
+                expr_from_projection(&select.projection[0])
+            );
+            assert_eq!(
+                &Expr::Value(Value::DoubleQuotedByteStringLiteral("abc".to_string())),
+                expr_from_projection(&select.projection[1])
+            );
+            assert_eq!(
+                &Expr::Value(Value::SingleQuotedByteStringLiteral(
+                    r"f\(abc,(.*),def\)".to_string()
+                )),
+                expr_from_projection(&select.projection[2])
+            );
+            assert_eq!(
+                &Expr::Value(Value::DoubleQuotedByteStringLiteral(
+                    r"f\(abc,(.*),def\)".to_string()
+                )),
+                expr_from_projection(&select.projection[3])
+            );
+            assert_eq!(
+                &Expr::Value(Value::TripleSingleQuotedByteStringLiteral(
+                    r"abc".to_string()
+                )),
+                expr_from_projection(&select.projection[4])
+            );
+            assert_eq!(
+                &Expr::Value(Value::TripleDoubleQuotedByteStringLiteral(
+                    r"abc".to_string()
+                )),
+                expr_from_projection(&select.projection[5])
+            );
+        }
+    } else {
+        panic!("invalid query");
+    }
 
-    let sql = r#"SELECT b'abc', b"abc""#;
-    bigquery().one_statement_parses_to(sql, r#"SELECT B'abc', B"abc""#);
+    bigquery().one_statement_parses_to(
+        r#"SELECT b'123', b"123", b'''123''', b"""123""""#,
+        r#"SELECT B'123', B"123", B'''123''', B"""123""""#,
+    );
 }
 
 #[test]
 fn parse_raw_literal() {
-    let sql = r#"SELECT R'abc', R"abc", R'f\(abc,(.*),def\)', R"f\(abc,(.*),def\)""#;
-    let stmt = bigquery().one_statement_parses_to(
-        sql,
-        r"SELECT R'abc', R'abc', R'f\(abc,(.*),def\)', R'f\(abc,(.*),def\)'",
+    let sql = concat!(
+        "SELECT ",
+        "R'abc', ",
+        r#"R"abc", "#,
+        r#"R'f\(abc,(.*),def\)', "#,
+        r#"R"f\(abc,(.*),def\)", "#,
+        r#"R'''abc''', "#,
+        r#"R"""abc""""#,
     );
+    let stmt = bigquery().verified_stmt(sql);
     if let Statement::Query(query) = stmt {
         if let SetExpr::Select(select) = *query.body {
-            assert_eq!(4, select.projection.len());
+            assert_eq!(6, select.projection.len());
             assert_eq!(
-                &Expr::Value(Value::RawStringLiteral("abc".to_string())),
+                &Expr::Value(Value::SingleQuotedRawStringLiteral("abc".to_string())),
                 expr_from_projection(&select.projection[0])
             );
             assert_eq!(
-                &Expr::Value(Value::RawStringLiteral("abc".to_string())),
+                &Expr::Value(Value::DoubleQuotedRawStringLiteral("abc".to_string())),
                 expr_from_projection(&select.projection[1])
             );
             assert_eq!(
-                &Expr::Value(Value::RawStringLiteral(r"f\(abc,(.*),def\)".to_string())),
+                &Expr::Value(Value::SingleQuotedRawStringLiteral(
+                    r"f\(abc,(.*),def\)".to_string()
+                )),
                 expr_from_projection(&select.projection[2])
             );
             assert_eq!(
-                &Expr::Value(Value::RawStringLiteral(r"f\(abc,(.*),def\)".to_string())),
+                &Expr::Value(Value::DoubleQuotedRawStringLiteral(
+                    r"f\(abc,(.*),def\)".to_string()
+                )),
                 expr_from_projection(&select.projection[3])
             );
-            return;
+            assert_eq!(
+                &Expr::Value(Value::TripleSingleQuotedRawStringLiteral(
+                    r"abc".to_string()
+                )),
+                expr_from_projection(&select.projection[4])
+            );
+            assert_eq!(
+                &Expr::Value(Value::TripleDoubleQuotedRawStringLiteral(
+                    r"abc".to_string()
+                )),
+                expr_from_projection(&select.projection[5])
+            );
         }
+    } else {
+        panic!("invalid query");
     }
-    panic!("invalid query")
+
+    bigquery().one_statement_parses_to(
+        r#"SELECT r'123', r"123", r'''123''', r"""123""""#,
+        r#"SELECT R'123', R"123", R'''123''', R"""123""""#,
+    );
 }
 
 #[test]
@@ -139,10 +261,12 @@ fn parse_create_view_with_options() {
                 vec![
                     ViewColumnDef {
                         name: Ident::new("name"),
+                        data_type: None,
                         options: None,
                     },
                     ViewColumnDef {
                         name: Ident::new("age"),
+                        data_type: None,
                         options: Some(vec![SqlOption {
                             name: Ident::new("description"),
                             value: Expr::Value(Value::DoubleQuotedString("field age".to_string())),
@@ -187,6 +311,7 @@ fn parse_create_view_if_not_exists() {
             materialized,
             options,
             cluster_by,
+            comment,
             with_no_schema_binding: late_binding,
             if_not_exists,
             temporary,
@@ -198,6 +323,7 @@ fn parse_create_view_if_not_exists() {
             assert!(!or_replace);
             assert_eq!(options, CreateTableOptions::None);
             assert_eq!(cluster_by, vec![]);
+            assert!(comment.is_none());
             assert!(!late_binding);
             assert!(if_not_exists);
             assert!(!temporary);
@@ -228,7 +354,7 @@ fn parse_create_view_with_unquoted_hyphen() {
 fn parse_create_table_with_unquoted_hyphen() {
     let sql = "CREATE TABLE my-pro-ject.mydataset.mytable (x INT64)";
     match bigquery().verified_stmt(sql) {
-        Statement::CreateTable { name, columns, .. } => {
+        Statement::CreateTable(CreateTable { name, columns, .. }) => {
             assert_eq!(
                 name,
                 ObjectName(vec![
@@ -262,14 +388,14 @@ fn parse_create_table_with_options() {
         r#"OPTIONS(partition_expiration_days = 1, description = "table option description")"#
     );
     match bigquery().verified_stmt(sql) {
-        Statement::CreateTable {
+        Statement::CreateTable(CreateTable {
             name,
             columns,
             partition_by,
             cluster_by,
             options,
             ..
-        } => {
+        }) => {
             assert_eq!(
                 name,
                 ObjectName(vec!["mydataset".into(), "newtable".into()])
@@ -351,7 +477,7 @@ fn parse_create_table_with_options() {
 fn parse_nested_data_types() {
     let sql = "CREATE TABLE table (x STRUCT<a ARRAY<INT64>, b BYTES(42)>, y ARRAY<STRUCT<INT64>>)";
     match bigquery_and_generic().one_statement_parses_to(sql, sql) {
-        Statement::CreateTable { name, columns, .. } => {
+        Statement::CreateTable(CreateTable { name, columns, .. }) => {
             assert_eq!(name, ObjectName(vec!["table".into()]));
             assert_eq!(
                 columns,
@@ -791,6 +917,27 @@ fn parse_typed_struct_syntax_bigquery() {
             }]
         },
         expr_from_projection(&select.projection[1])
+    );
+
+    // Keywords in the parser may be used as field names.
+    let sql = r#"SELECT STRUCT<key INT64, value INT64>(1, 2)"#;
+    let select = bigquery().verified_only_select(sql);
+    assert_eq!(1, select.projection.len());
+    assert_eq!(
+        &Expr::Struct {
+            values: vec![Expr::Value(number("1")), Expr::Value(number("2")),],
+            fields: vec![
+                StructField {
+                    field_name: Some("key".into()),
+                    field_type: DataType::Int64,
+                },
+                StructField {
+                    field_name: Some("value".into()),
+                    field_type: DataType::Int64,
+                },
+            ]
+        },
+        expr_from_projection(&select.projection[0])
     );
 }
 
@@ -1696,38 +1843,6 @@ fn parse_array_agg_func() {
 }
 
 #[test]
-fn test_select_wildcard_with_except() {
-    let select = bigquery_and_generic().verified_only_select("SELECT * EXCEPT (col_a) FROM data");
-    let expected = SelectItem::Wildcard(WildcardAdditionalOptions {
-        opt_except: Some(ExceptSelectItem {
-            first_element: Ident::new("col_a"),
-            additional_elements: vec![],
-        }),
-        ..Default::default()
-    });
-    assert_eq!(expected, select.projection[0]);
-
-    let select = bigquery_and_generic()
-        .verified_only_select("SELECT * EXCEPT (department_id, employee_id) FROM employee_table");
-    let expected = SelectItem::Wildcard(WildcardAdditionalOptions {
-        opt_except: Some(ExceptSelectItem {
-            first_element: Ident::new("department_id"),
-            additional_elements: vec![Ident::new("employee_id")],
-        }),
-        ..Default::default()
-    });
-    assert_eq!(expected, select.projection[0]);
-
-    assert_eq!(
-        bigquery_and_generic()
-            .parse_sql_statements("SELECT * EXCEPT () FROM employee_table")
-            .unwrap_err()
-            .to_string(),
-        "sql parser error: Expected identifier, found: )"
-    );
-}
-
-#[test]
 fn parse_big_query_declare() {
     for (sql, expected_names, expected_data_type, expected_assigned_expr) in [
         (
@@ -1840,6 +1955,145 @@ fn parse_map_access_expr() {
 }
 
 #[test]
+fn test_bigquery_create_function() {
+    let sql = concat!(
+        "CREATE OR REPLACE TEMPORARY FUNCTION ",
+        "project1.mydataset.myfunction(x FLOAT64) ",
+        "RETURNS FLOAT64 ",
+        "OPTIONS(x = 'y') ",
+        "AS 42"
+    );
+
+    let stmt = bigquery().verified_stmt(sql);
+    assert_eq!(
+        stmt,
+        Statement::CreateFunction {
+            or_replace: true,
+            temporary: true,
+            if_not_exists: false,
+            name: ObjectName(vec![
+                Ident::new("project1"),
+                Ident::new("mydataset"),
+                Ident::new("myfunction"),
+            ]),
+            args: Some(vec![OperateFunctionArg::with_name("x", DataType::Float64),]),
+            return_type: Some(DataType::Float64),
+            function_body: Some(CreateFunctionBody::AsAfterOptions(Expr::Value(number(
+                "42"
+            )))),
+            options: Some(vec![SqlOption {
+                name: Ident::new("x"),
+                value: Expr::Value(Value::SingleQuotedString("y".into())),
+            }]),
+            behavior: None,
+            using: None,
+            language: None,
+            determinism_specifier: None,
+            remote_connection: None,
+            called_on_null: None,
+            parallel: None,
+        }
+    );
+
+    let sqls = [
+        // Arbitrary Options expressions.
+        concat!(
+            "CREATE OR REPLACE TEMPORARY FUNCTION ",
+            "myfunction(a FLOAT64, b INT64, c STRING) ",
+            "RETURNS ARRAY<FLOAT64> ",
+            "OPTIONS(a = [1, 2], b = 'two', c = [('k1', 'v1'), ('k2', 'v2')]) ",
+            "AS ((SELECT 1 FROM mytable))"
+        ),
+        // Options after body.
+        concat!(
+            "CREATE OR REPLACE TEMPORARY FUNCTION ",
+            "myfunction(a FLOAT64, b INT64, c STRING) ",
+            "RETURNS ARRAY<FLOAT64> ",
+            "AS ((SELECT 1 FROM mytable)) ",
+            "OPTIONS(a = [1, 2], b = 'two', c = [('k1', 'v1'), ('k2', 'v2')])",
+        ),
+        // IF NOT EXISTS
+        concat!(
+            "CREATE OR REPLACE TEMPORARY FUNCTION IF NOT EXISTS ",
+            "myfunction(a FLOAT64, b INT64, c STRING) ",
+            "RETURNS ARRAY<FLOAT64> ",
+            "OPTIONS(a = [1, 2]) ",
+            "AS ((SELECT 1 FROM mytable))"
+        ),
+        // No return type.
+        concat!(
+            "CREATE OR REPLACE TEMPORARY FUNCTION ",
+            "myfunction(a FLOAT64, b INT64, c STRING) ",
+            "OPTIONS(a = [1, 2]) ",
+            "AS ((SELECT 1 FROM mytable))"
+        ),
+        // With language - body after options
+        concat!(
+            "CREATE OR REPLACE TEMPORARY FUNCTION ",
+            "myfunction(a FLOAT64, b INT64, c STRING) ",
+            "DETERMINISTIC ",
+            "LANGUAGE js ",
+            "OPTIONS(a = [1, 2]) ",
+            "AS \"console.log('hello');\""
+        ),
+        // With language - body before options
+        concat!(
+            "CREATE OR REPLACE TEMPORARY FUNCTION ",
+            "myfunction(a FLOAT64, b INT64, c STRING) ",
+            "NOT DETERMINISTIC ",
+            "LANGUAGE js ",
+            "AS \"console.log('hello');\" ",
+            "OPTIONS(a = [1, 2])",
+        ),
+        // Remote
+        concat!(
+            "CREATE OR REPLACE TEMPORARY FUNCTION ",
+            "myfunction(a FLOAT64, b INT64, c STRING) ",
+            "RETURNS INT64 ",
+            "REMOTE WITH CONNECTION us.myconnection ",
+            "OPTIONS(a = [1, 2])",
+        ),
+    ];
+    for sql in sqls {
+        bigquery().verified_stmt(sql);
+    }
+
+    let error_sqls = [
+        (
+            concat!(
+                "CREATE TEMPORARY FUNCTION myfunction() ",
+                "OPTIONS(a = [1, 2]) ",
+                "AS ((SELECT 1 FROM mytable)) ",
+                "OPTIONS(a = [1, 2])",
+            ),
+            "Expected end of statement, found: OPTIONS",
+        ),
+        (
+            concat!(
+                "CREATE TEMPORARY FUNCTION myfunction() ",
+                "IMMUTABLE ",
+                "AS ((SELECT 1 FROM mytable)) ",
+            ),
+            "Expected AS, found: IMMUTABLE",
+        ),
+        (
+            concat!(
+                "CREATE TEMPORARY FUNCTION myfunction() ",
+                "AS \"console.log('hello');\" ",
+                "LANGUAGE js ",
+            ),
+            "Expected end of statement, found: LANGUAGE",
+        ),
+    ];
+    for (sql, error) in error_sqls {
+        assert_eq!(
+            ParserError::ParserError(error.to_owned()),
+            bigquery().parse_sql_statements(sql).unwrap_err()
+        );
+    }
+}
+
+#[test]
 fn test_bigquery_trim() {
     let real_sql = r#"SELECT customer_id, TRIM(item_price_id, '"', "a") AS item_price_id FROM models_staging.subscriptions"#;
     assert_eq!(bigquery().verified_stmt(real_sql).to_string(), real_sql);
@@ -1902,4 +2156,14 @@ fn test_array_agg() {
     bigquery_and_generic()
         .verified_expr("ARRAY_AGG(DISTINCT state IGNORE NULLS ORDER BY population DESC LIMIT 10)");
     bigquery_and_generic().verified_expr("ARRAY_CONCAT_AGG(x ORDER BY ARRAY_LENGTH(x))");
+}
+
+#[test]
+fn test_any_value() {
+    bigquery_and_generic().verified_expr("ANY_VALUE(fruit)");
+    bigquery_and_generic().verified_expr(
+        "ANY_VALUE(fruit) OVER (ORDER BY LENGTH(fruit) ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)",
+    );
+    bigquery_and_generic().verified_expr("ANY_VALUE(fruit HAVING MAX sold)");
+    bigquery_and_generic().verified_expr("ANY_VALUE(fruit HAVING MIN sold)");
 }
