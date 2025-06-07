@@ -1,0 +1,1 @@
+ALTER TABLE t ADD CONSTRAINT c KEY key_name (t1.c1, t2.c2)
